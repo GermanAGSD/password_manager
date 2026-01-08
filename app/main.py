@@ -12,7 +12,7 @@ app = FastAPI()
 # LDAP settings
 LDAP_SERVER = 'ldap://172.30.30.3'
 LDAP_BIND_DN = 'CN=my-service,CN=Users,DC=bull,DC=local'
-LDAP_PASSWORD = 'Nhb;ls<sr-3'
+LDAP_PASSWORD = ''
 # JWT settings
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='login')
 SECRET_KEY = "my_secret_key"  # Make sure this is kept safe and not exposed
