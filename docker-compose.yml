@@ -1,11 +1,8 @@
-version: "3.9"
-
+version: "3"
 services:
-  ldap_auth:
+  ldap_auth_jwt:
     build: .
-    container_name: auth_ldap
     ports:
-      - "6200:6200"
-    environment:
-      - TZ=Europe/Moscow
-    restart: unless-stopped
+      - 6200:6200
+    volumes:
+      - ./:/usr/src/app
