@@ -5,7 +5,7 @@ services:
     build: .
     container_name: auth_ldap
     ports:
-      - "8300:8300"
+      - "6200:6200"
     environment:
       - TZ=Europe/Moscow
     restart: unless-stopped
