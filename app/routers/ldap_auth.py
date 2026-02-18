@@ -63,7 +63,9 @@ async def login_for_access_token(
 
     # Генерация токенов с использованием user.id
     # access_token = create_token({"sub": user.id})  # Здесь передаем user.id, а не username
-    access_token = create_token({"sub": user.id})  # Убедитесь, что sub - строка
+    # access_token = create_token({"sub": user.id})  # Убедитесь, что sub - строка
+    # access_token = create_token(data={"user_id": user.id})
+    access_token = create_token(data={"user_id": user.id})
 
     refresh_token, refresh_hash, expires = create_refresh_token()
 

@@ -11,6 +11,7 @@ from app.models import Users
 import secrets
 import hashlib
 from passlib.context import CryptContext
+from app.models import Users
 oauth_scheme = OAuth2PasswordBearer(tokenUrl='/login')
 
 
@@ -21,41 +22,26 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 refresh_tokens = {}
 
-# def create_token(data: dict):
-#     if not isinstance(data, dict):
-#         raise ValueError("Expected 'data' to be a dictionary")
-#
-#     to_encode = data.copy()  # копируем данные для кодирования
-#     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#     to_encode.update({'exp': expire})  # добавляем время истечения срока действия
-#     encode_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)  # создаём JWT токен
-#     return encode_jwt
-
 def create_token(data: dict):
-    # Убедитесь, что в 'sub' всегда передается строка
-    if not isinstance(data.get("sub"), str):
-        data["sub"] = str(data["sub"])  # Преобразуем в строку, если это не строка
-
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({'exp': expire})
+    to_encode.update({'sub': str(data['user_id'])})  # Преобразуем user_id в строку
     encode_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encode_jwt
-
 
 
 def verify_access_token(token: str, credentials_exception):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
-        # Используем 'sub' для идентификатора пользователя
-        user_id = payload.get("sub")  # 'sub' это идентификатор пользователя
-
+        user_id = payload.get("sub")  # Берем "sub" вместо "user_id"
         if user_id is None:
             raise credentials_exception
 
-        token_data = TokenData(id=user_id)
+        token_data = TokenData(id=str(user_id))  # Преобразуем в строку
         return token_data
+
     except JWTError as e:
         print("❌ JWTError:", e)
         raise credentials_exception
@@ -69,12 +55,9 @@ def get_current_user(token: str = Depends(oauth_scheme), db: Session = Depends(g
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    # Получаем данные токена
     token_data = verify_access_token(token, cred_excp)
 
-    # Вместо поиска по users.id ищем по email или username
-    user = db.query(Users).filter(Users.email == token_data.id).first()  # Ищем по email (или используйте username)
-
+    user = db.query(Users).filter(Users.id == token_data.id).first()  # ✅ добавили .first()
     if not user:
         raise cred_excp
 
