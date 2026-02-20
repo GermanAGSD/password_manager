@@ -31,8 +31,10 @@ class Group(Base):
     name = Column(String, unique=True, index=True)
     description = Column(String, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"))
-    users = relationship("Users", secondary="user_group_association", back_populates="groups")
     visible = Column(Boolean, nullable=True, default=True)
+
+    users = relationship("Users", secondary="user_group_association", back_populates="groups")
+    passwords = relationship("PasswordManager", back_populates="group")  # добавить
 
 class PasswordManager(Base):
     __tablename__ = "passwords"
@@ -41,8 +43,9 @@ class PasswordManager(Base):
     login_password = Column(String, nullable=False)
     description = Column(String, nullable=True)
     about_password = Column(String, nullable=True)
-    # Внешний ключ на пользователя, создавшего запись
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
-    password_group = Column(Integer, ForeignKey('groups.id'), nullable=True)
-    # Обратная связь
+    password_group = Column(Integer, ForeignKey('groups.id'), nullable=True)  # уже есть
+
+    # Relationships
     creator = relationship("Users", back_populates="passwords")
+    group = relationship("Group", foreign_keys=[password_group], back_populates="passwords")  # добавить

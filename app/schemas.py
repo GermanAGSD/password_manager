@@ -36,7 +36,7 @@ class Password(BaseModel):
     description: Optional[str] = None
     about_password: Optional[str] = None
     created_by: int
-
+    password_group: Optional[int] = None  # добавить поле
 
     class Config:
         orm_mode = True
@@ -73,3 +73,25 @@ class UserDetails(BaseModel):
 
 class GroupAll(BaseModel):
     groups: List[Group]
+
+# Схема для создания пароля (уже может быть)
+class PasswordCreate(BaseModel):
+    login_password: str
+    password: str
+    description: Optional[str] = None
+    about_password: Optional[str] = None
+    password_group: Optional[int] = None  # добавить опциональное поле
+
+class GroupInfo(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        orm_mode = True
+
+class PasswordWithGroup(Password):
+    group_info: Optional[GroupInfo] = None
+
+# Схема для назначения группы паролю
+class PasswordGroupAssign(BaseModel):
+    group_id: int
