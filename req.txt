@@ -4,3 +4,5 @@ fastapi
 psycopg2-binary
 ldap3
 uvicorn
+pydantic-settings
+passlib[bcrypt]
