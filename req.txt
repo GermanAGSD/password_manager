@@ -1,6 +1,6 @@
 python-multipart
 python-jose[cryptography]
 fastapi
-psycopg2
+psycopg2-binary
 ldap3
 uvicorn
