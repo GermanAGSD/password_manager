@@ -1,0 +1,6 @@
+python-multipart
+python-jose[cryptography]
+fastapi
+psycopg2
+ldap3
+uvicorn
