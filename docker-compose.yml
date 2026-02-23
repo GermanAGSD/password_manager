@@ -3,7 +3,7 @@ services:
   password_manager:
     build: .
     ports:
-      - 6100:6200
+      - 6100:6100
     volumes:
       - ./:/usr/src/app
     env_file:
