@@ -295,6 +295,7 @@ async def login_for_access_token(
         "user_id": user.id,  # полезно фронту
     }
 
+
 @router.get("/user/{user_id}/groups", response_model=list[schemas.GroupWithCreator])
 async def get_groups_by_user(
         user_id: int,
