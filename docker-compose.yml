@@ -6,3 +6,5 @@ services:
       - 6100:6200
     volumes:
       - ./:/usr/src/app
+    env_file:
+      - .env
