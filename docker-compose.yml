@@ -3,6 +3,6 @@ services:
   password_manager:
     build: .
     ports:
-      - 6200:6200
+      - 6100:6200
     volumes:
       - ./:/usr/src/app
