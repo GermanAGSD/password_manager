@@ -24,11 +24,15 @@ class Token(BaseModel):
 class RefreshRequest(BaseModel):
     refresh_token: str
 
+
+
+
 class PasswordCreate(BaseModel):
     password: str
     login_password: str
     description: Optional[str] = None
     about_password: Optional[str] = None
+    password_group: Optional[int] = None
 
     class Config:
         orm_mode = True
@@ -39,13 +43,14 @@ class UserPasswordCount(BaseModel):
 
 class PasswordPickItem(BaseModel):
     id: int
-    description: Optional[str] = None
-    login_password: str
+    description: str | None = None
+    login_password: str | None = None
+    about_password: str | None = None
     created_by: int
-    password_group: Optional[int] = None
+    creator_login: str | None = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class SharePasswordsUpdate(BaseModel):
     password_ids: List[int]
@@ -142,3 +147,25 @@ class PasswordWithGroup(Password):
 # Схема для назначения группы паролю
 class PasswordGroupAssign(BaseModel):
     group_id: int
+
+class PasswordListItem(BaseModel):
+    id: int
+    description: Optional[str] = None
+    login_password: Optional[str] = None
+    about_password: Optional[str] = None
+    created_by: int
+    password_group: Optional[int] = None
+    group_info: Optional[GroupInfo] = None
+
+    # NEW: вместо открытого пароля
+    has_password: bool = True
+    password_masked: str = "••••••••"
+
+    class Config:
+        orm_mode = True
+
+
+class PasswordRevealResponse(BaseModel):
+    id: int
+    password: str  # plaintext только по отдельному запросу
+
