@@ -22,6 +22,7 @@ from app.oauth import create_token, verify_access_token,get_current_user, create
 from typing import List, Optional
 from sqlalchemy import select, func
 from app.utils_crypto import encrypt_secret, decrypt_secret
+from ldap3.utils.conv import escape_filter_chars
 router = APIRouter(
     # prefix="/posts",
     # tags=['Posts']
@@ -33,6 +34,81 @@ LDAP_BIND_DN = 'CN=my-service,CN=Users,DC=bull,DC=local'
 LDAP_PASSWORD = settings.domain_password
 refresh_tokens = {}
 
+def sync_ldap_groups_for_user(db: Session, user: models.Users) -> list[str]:
+    """
+    Синхронизирует LDAP memberOf -> таблицы Group и UserGroupAssociation для одного пользователя.
+    Возвращает список group_dn из LDAP.
+    """
+    if not user or not user.email:
+        return []
+
+    server = Server(LDAP_SERVER, get_info=ALL)
+    conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
+
+    # ВАЖНО: экранируем логин для LDAP filter
+    safe_username = escape_filter_chars(user.email)
+    search_filter = f"(sAMAccountName={safe_username})"
+
+    conn.search(
+        "DC=bull,DC=local",
+        search_filter,
+        SUBTREE,
+        attributes=["memberOf"]
+    )
+
+    if len(conn.entries) == 0:
+        # Пользователь в LDAP не найден — ничего не делаем
+        return []
+
+    entry = conn.entries[0]
+    groups = entry.memberOf.values if hasattr(entry.memberOf, "values") else []
+    groups = list(groups or [])
+
+    # 1) создаём/находим группы
+    group_ids_from_ldap = set()
+
+    for group_dn in groups:
+        group = db.query(models.Group).filter(models.Group.name == group_dn).first()
+        if not group:
+            group = models.Group(
+                name=group_dn,
+                created_by=user.id,   # можно оставить так
+            )
+            db.add(group)
+            db.flush()  # вместо commit внутри цикла
+
+        group_ids_from_ldap.add(group.id)
+
+        # 2) создаём связь user <-> group если её нет
+        exists = db.query(models.UserGroupAssociation).filter(
+            models.UserGroupAssociation.user_id == user.id,
+            models.UserGroupAssociation.group_id == group.id
+        ).first()
+
+        if not exists:
+            db.add(models.UserGroupAssociation(
+                user_id=user.id,
+                group_id=group.id
+            ))
+
+    # 3) (опционально) удаляем старые LDAP-связи, которых уже нет в LDAP
+    # ВНИМАНИЕ: включай это только если в этой таблице Group у тебя действительно LDAP-группы,
+    # а не пользовательские "локальные" группы.
+    #
+    # current_links = (
+    #     db.query(models.UserGroupAssociation)
+    #     .join(models.Group, models.Group.id == models.UserGroupAssociation.group_id)
+    #     .filter(models.UserGroupAssociation.user_id == user.id)
+    #     .all()
+    # )
+    #
+    # for link in current_links:
+    #     grp = db.query(models.Group).filter(models.Group.id == link.group_id).first()
+    #     if grp and grp.name and "DC=" in grp.name and grp.id not in group_ids_from_ldap:
+    #         db.delete(link)
+
+    db.commit()
+    return groups
 
 def _safe_decrypt_password_value(value: Optional[str]) -> Optional[str]:
     """
@@ -219,7 +295,6 @@ async def login_for_access_token(
         "user_id": user.id,  # полезно фронту
     }
 
-
 @router.get("/user/{user_id}/groups", response_model=list[schemas.GroupWithCreator])
 async def get_groups_by_user(
         user_id: int,
@@ -229,12 +304,26 @@ async def get_groups_by_user(
     if current_user.id != user_id and not current_user.issuperuser:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    # Находим пользователя в БД
+    user = db.query(models.Users).filter(models.Users.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # ✅ Синхронизируем LDAP-группы ПЕРЕД чтением из БД
+    # Это решает проблему "админ не видит новую группу до перелогина пользователя"
+    try:
+        sync_ldap_groups_for_user(db, user)
+    except Exception as e:
+        # Можно не падать полностью, а просто логировать и вернуть то, что есть в БД
+        # raise HTTPException(status_code=500, detail=f"LDAP sync failed: {str(e)}")
+        print(f"LDAP sync failed for user_id={user_id}: {e}")
+
     groups_with_creator = (
         db.query(models.Group, models.Users.name.label("creator_name"))
         .join(models.UserGroupAssociation, models.UserGroupAssociation.group_id == models.Group.id)
         .join(models.Users, models.Users.id == models.Group.created_by)
         .filter(models.UserGroupAssociation.user_id == user_id)
-        .distinct(models.Group.id)  # <-- убираем дубли
+        .distinct(models.Group.id)
         .all()
     )
 
