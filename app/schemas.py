@@ -21,6 +21,9 @@ class Token(BaseModel):
     refresh_token: str
     issuperuser: bool
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
 class PasswordCreate(BaseModel):
     password: str
     login_password: str

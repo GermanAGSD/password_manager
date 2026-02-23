@@ -63,15 +63,15 @@ async def get_visible_passwords(
 @router.post("/login", response_model=schemas.Token)
 async def login_for_access_token(
         response: Response,
-        login_data: schemas.LoginRequest,  # Используем модель LoginRequest
+        login_data: schemas.LoginRequest,
         db: Session = Depends(database.get_db),
 ):
-    # Подключение к LDAP серверу и проверка пользователя
+    # LDAP auth
     server = Server(LDAP_SERVER, get_info=ALL)
     conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
 
     search_filter = f"(sAMAccountName={login_data.username})"
-    conn.search('DC=bull,DC=local', search_filter, SUBTREE, attributes=['cn', 'mail', 'memberOf'])
+    conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "mail", "memberOf"])
 
     if len(conn.entries) == 0:
         raise HTTPException(status_code=404, detail="User not found")
@@ -82,62 +82,73 @@ async def login_for_access_token(
     if not user_conn.bind():
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Получение групп
-    groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, 'values') else []
+    groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, "values") else []
 
+    # DB user
     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
 
+    # Хэшируем пароль для хранения
+    # hashed = hash_password(login_data.password)
+
     if not user:
-        # Если пользователя нет в базе, создаем нового
-        user = models.Users(name=login_data.username, email=login_data.username, domainpass=login_data.password)
+        user = models.Users(
+            name=login_data.username,
+            email=login_data.username,
+            domainpass=login_data.password,   # <-- ХЭШ вместо plain
+        )
         db.add(user)
         db.commit()
+        db.refresh(user)
+    else:
+        # (опционально) обновляем хэш только если пароль отличается
+        # если domainpass может быть пустой/None - учти это
+        try:
+            needs_update = not verify_password(login_data.password, user.domainpass)
+        except Exception:
+            needs_update = True
 
-    # Генерация токенов с использованием user.id
-    # access_token = create_token({"sub": user.id})  # Здесь передаем user.id, а не username
-    # access_token = create_token({"sub": user.id})  # Убедитесь, что sub - строка
-    # access_token = create_token(data={"user_id": user.id})
-    access_token = create_token(data={"user_id": user.id})
+        if needs_update:
+            user.domainpass = login_data.password
+            db.commit()
+            db.refresh(user)
 
+    # access/refresh токены (как было)
+    access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
     refresh_token, refresh_hash, expires = create_refresh_token()
 
-    # Добавляем группы пользователя в таблицу связи
+    # Группы/ассоциации — лучше без дублей (чтобы не плодить записи)
     for group_dn in groups:
         group = db.query(models.Group).filter(models.Group.name == group_dn).first()
         if not group:
-            # Если группы нет, создаем её
             group = models.Group(name=group_dn, created_by=user.id)
             db.add(group)
             db.commit()
+            db.refresh(group)
 
-        # Создаем ассоциацию пользователя с группой
-        user_group_association = models.UserGroupAssociation(user_id=user.id, group_id=group.id)
-        db.add(user_group_association)
+        exists = db.query(models.UserGroupAssociation).filter(
+            models.UserGroupAssociation.user_id == user.id,
+            models.UserGroupAssociation.group_id == group.id
+        ).first()
+
+        if not exists:
+            db.add(models.UserGroupAssociation(user_id=user.id, group_id=group.id))
 
     db.commit()
 
-    # Сохранение refresh_token в куки
     refresh_tokens[refresh_hash] = {
-        "user_id": user_dn,  # user_dn — строка DN
+        "user_id": user.id,
         "expires": expires,
         "revoked": False,
-        "groups": groups
+        "groups": groups,
     }
 
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=True,
-        samesite="strict"
-    )
 
     return {
-        'refresh_token': refresh_token,
+        "refresh_token": refresh_token,
         "access_token": access_token,
         "token_type": "bearer",
-        "issuperuser": user.issuperuser
-        # "groups": groups,
+        "issuperuser": user.issuperuser,
+        "user_id": user.id,  # полезно фронту
     }
 
 
@@ -227,45 +238,52 @@ async def get_groups_by_user(
 # db.commit()
 
 @router.post("/auth/refresh")
-def refresh_token(
-        response: Response,
-        refresh_token: str = Cookie(None)
+def refresh_token_endpoint(
+        payload: schemas.RefreshRequest,   # ✅ берём из body, а не Cookie
+        db: Session = Depends(database.get_db),
 ):
+    refresh_token = payload.refresh_token
     if not refresh_token:
         raise HTTPException(status_code=401, detail="No refresh token")
 
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     token_data = refresh_tokens.get(token_hash)
 
-    if not token_data or token_data["revoked"]:
+    if not token_data or token_data.get("revoked"):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     if token_data["expires"] < datetime.utcnow():
         raise HTTPException(status_code=401, detail="Refresh expired")
 
-    # revoke old
+    # Находим пользователя
+    user = db.query(Users).filter(Users.id == token_data["user_id"]).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # revoke старый refresh
     token_data["revoked"] = True
 
-    # issue new
-    new_access = create_token(token_data["user_id"])
+    # новый access + новый refresh
+    new_access = create_token({
+        "user_id": user.id,
+        "issuperuser": user.issuperuser
+    })
+
     new_refresh, new_hash, new_expires = create_refresh_token()
 
     refresh_tokens[new_hash] = {
-        "user_id": token_data["user_id"],
+        "user_id": user.id,
         "expires": new_expires,
         "revoked": False
     }
 
-    response.set_cookie(
-        key="refresh_token",
-        value=new_refresh,
-        httponly=True,
-        secure=True,
-        samesite="strict"
-    )
-
-    return {"access_token": new_access}
-
+    # ✅ обязательно вернуть новый refresh, т.к. старый уже revoke
+    return {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+        "token_type": "bearer",
+        "issuperuser": user.issuperuser
+    }
 @router.post("/passwords", response_model=schemas.Password)
 async def create_password(
         password_data: schemas.PasswordCreate,
