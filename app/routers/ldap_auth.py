@@ -5,7 +5,7 @@ import uvicorn
 from fastapi.security import OAuth2PasswordBearer
 from ldap3 import Server, Connection, ALL, SIMPLE, SUBTREE
 from jose import JWTError, jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, Form, HTTPException, Response, Cookie, APIRouter
 from app import schemas, models
 from app import database
@@ -23,6 +23,7 @@ from typing import List, Optional
 from sqlalchemy import select, func
 from app.utils_crypto import encrypt_secret, decrypt_secret
 from ldap3.utils.conv import escape_filter_chars
+
 router = APIRouter(
     # prefix="/posts",
     # tags=['Posts']
@@ -32,7 +33,10 @@ router = APIRouter(
 LDAP_SERVER = 'ldap://172.30.30.3'
 LDAP_BIND_DN = 'CN=my-service,CN=Users,DC=bull,DC=local'
 LDAP_PASSWORD = settings.domain_password
-refresh_tokens = {}
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 def sync_ldap_groups_for_user(db: Session, user: models.Users) -> list[str]:
     """
@@ -256,18 +260,17 @@ async def login_for_access_token(
             db.commit()
             db.refresh(user)
 
-    # access/refresh токены (как было)
+    # access/refresh токены
     access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
     refresh_token, refresh_hash, expires = create_refresh_token()
 
-    # Группы/ассоциации — лучше без дублей (чтобы не плодить записи)
+    # Группы/ассоциации — лучше без дублей
     for group_dn in groups:
         group = db.query(models.Group).filter(models.Group.name == group_dn).first()
         if not group:
             group = models.Group(name=group_dn, created_by=user.id)
             db.add(group)
-            db.commit()
-            db.refresh(group)
+            db.flush()  # вместо commit внутри цикла
 
         exists = db.query(models.UserGroupAssociation).filter(
             models.UserGroupAssociation.user_id == user.id,
@@ -277,22 +280,22 @@ async def login_for_access_token(
         if not exists:
             db.add(models.UserGroupAssociation(user_id=user.id, group_id=group.id))
 
+    # сохраняем refresh hash в БД
+    db.add(models.RefreshToken(
+        user_id=user.id,
+        token_hash=refresh_hash,
+        expires_at=expires,
+        revoked=False
+    ))
+
     db.commit()
-
-    refresh_tokens[refresh_hash] = {
-        "user_id": user.id,
-        "expires": expires,
-        "revoked": False,
-        "groups": groups,
-    }
-
 
     return {
         "refresh_token": refresh_token,
         "access_token": access_token,
         "token_type": "bearer",
         "issuperuser": user.issuperuser,
-        "user_id": user.id,  # полезно фронту
+        "user_id": user.id,
     }
 
 
@@ -321,10 +324,16 @@ async def get_groups_by_user(
 
     groups_with_creator = (
         db.query(models.Group, models.Users.name.label("creator_name"))
-        .join(models.UserGroupAssociation, models.UserGroupAssociation.group_id == models.Group.id)
+        .join(
+            models.UserGroupAssociation,
+            models.UserGroupAssociation.group_id == models.Group.id
+        )
         .join(models.Users, models.Users.id == models.Group.created_by)
-        .filter(models.UserGroupAssociation.user_id == user_id)
-        .distinct(models.Group.id)
+        .filter(
+            models.UserGroupAssociation.user_id == user_id,
+            models.Group.visible.is_(True)
+        )
+        .distinct()
         .all()
     )
 
@@ -345,31 +354,41 @@ async def get_groups_by_user(
 
 @router.post("/auth/refresh")
 def refresh_token_endpoint(
-        payload: schemas.RefreshRequest,   # ✅ берём из body, а не Cookie
+        payload: schemas.RefreshRequest,
         db: Session = Depends(database.get_db),
 ):
     refresh_token = payload.refresh_token
     if not refresh_token:
         raise HTTPException(status_code=401, detail="No refresh token")
 
-    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-    token_data = refresh_tokens.get(token_hash)
+    token_hash = hash_refresh_token(refresh_token)
 
-    if not token_data or token_data.get("revoked"):
+    token_row = (
+        db.query(models.RefreshToken)
+        .filter(models.RefreshToken.token_hash == token_hash)
+        .first()
+    )
+
+    if not token_row:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    if token_data["expires"] < datetime.utcnow():
+    if token_row.revoked:
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+
+    # timezone-aware сравнение (так как expires_at у тебя TIMESTAMP(timezone=True))
+    now_utc = datetime.now(timezone.utc)
+    if token_row.expires_at < now_utc:
         raise HTTPException(status_code=401, detail="Refresh expired")
 
-    # Находим пользователя
-    user = db.query(Users).filter(Users.id == token_data["user_id"]).first()
+    user = db.query(Users).filter(Users.id == token_row.user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # revoke старый refresh
-    token_data["revoked"] = True
+    # ревокаем старый refresh
+    token_row.revoked = True
+    token_row.revoked_at = now_utc
 
-    # новый access + новый refresh
+    # выдаем новый access + refresh
     new_access = create_token({
         "user_id": user.id,
         "issuperuser": user.issuperuser
@@ -377,18 +396,21 @@ def refresh_token_endpoint(
 
     new_refresh, new_hash, new_expires = create_refresh_token()
 
-    refresh_tokens[new_hash] = {
-        "user_id": user.id,
-        "expires": new_expires,
-        "revoked": False
-    }
+    db.add(models.RefreshToken(
+        user_id=user.id,
+        token_hash=new_hash,
+        expires_at=new_expires,
+        revoked=False
+    ))
 
-    # ✅ обязательно вернуть новый refresh, т.к. старый уже revoke
+    db.commit()
+
     return {
         "access_token": new_access,
         "refresh_token": new_refresh,
         "token_type": "bearer",
-        "issuperuser": user.issuperuser
+        "issuperuser": user.issuperuser,
+        "user_id": user.id,
     }
 @router.post("/passwords", response_model=schemas.Password)
 async def create_password(
@@ -494,7 +516,7 @@ async def get_visible_groups_by_user(
         models.UserGroupAssociation.group_id == models.Group.id
     ).filter(
         models.UserGroupAssociation.user_id == user_id,
-        # models.Group.visible == True
+        models.Group.visible == True
     ).join(
         models.Users,
         models.Users.id == models.Group.created_by   # связываем создателя
@@ -573,6 +595,7 @@ async def get_all_users_details(
     rows = (
         db.query(models.UserGroupAssociation.user_id, models.Group.name)
         .join(models.Group, models.Group.id == models.UserGroupAssociation.group_id)
+        .filter(models.Group.visible.is_(True))
         .distinct()
         .all()
     )

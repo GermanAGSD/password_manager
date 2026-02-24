@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, UniqueConstraint, DateTime, func
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql.expression import text
 from sqlalchemy.sql.sqltypes import TIMESTAMP
@@ -18,7 +18,7 @@ class Users(Base):
     passwords = relationship("PasswordManager", back_populates="creator")
     # Связь с группами
     groups = relationship("Group", secondary="user_group_association", back_populates="users")
-
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
 
 class UserPasswordShare(Base):
     __tablename__ = "user_password_share"
@@ -63,3 +63,24 @@ class PasswordManager(Base):
     # Relationships
     creator = relationship("Users", back_populates="passwords")
     group = relationship("Group", foreign_keys=[password_group], back_populates="passwords")  # добавить
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, nullable=False, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Храним только SHA-256 hash refresh-токена (не сам токен)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+
+    revoked = Column(Boolean, nullable=False, default=False)
+    expires_at = Column(TIMESTAMP(timezone=True), nullable=False)
+
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    revoked_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # опционально
+    user_agent = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
+
+    user = relationship("Users", back_populates="refresh_tokens")
