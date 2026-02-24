@@ -181,6 +181,7 @@ async def get_visible_passwords(
     )
 
     return [to_password_schema(p) for p in rows]
+
 # @router.get("/users/{user_id}/visible_passwords", response_model=list[schemas.Password])
 # async def get_visible_passwords(
 #         user_id: int,
@@ -230,7 +231,7 @@ async def login_for_access_token(
     if not user_conn.bind():
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, "values") else []
+    # groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, "values") else []
 
     # DB user
     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
@@ -265,20 +266,20 @@ async def login_for_access_token(
     refresh_token, refresh_hash, expires = create_refresh_token()
 
     # Группы/ассоциации — лучше без дублей
-    for group_dn in groups:
-        group = db.query(models.Group).filter(models.Group.name == group_dn).first()
-        if not group:
-            group = models.Group(name=group_dn, created_by=user.id)
-            db.add(group)
-            db.flush()  # вместо commit внутри цикла
-
-        exists = db.query(models.UserGroupAssociation).filter(
-            models.UserGroupAssociation.user_id == user.id,
-            models.UserGroupAssociation.group_id == group.id
-        ).first()
-
-        if not exists:
-            db.add(models.UserGroupAssociation(user_id=user.id, group_id=group.id))
+    # for group_dn in groups:
+    #     group = db.query(models.Group).filter(models.Group.name == group_dn).first()
+    #     if not group:
+    #         group = models.Group(name=group_dn, created_by=user.id)
+    #         db.add(group)
+    #         db.flush()  # вместо commit внутри цикла
+    #
+    #     exists = db.query(models.UserGroupAssociation).filter(
+    #         models.UserGroupAssociation.user_id == user.id,
+    #         models.UserGroupAssociation.group_id == group.id
+    #     ).first()
+    #
+    #     if not exists:
+    #         db.add(models.UserGroupAssociation(user_id=user.id, group_id=group.id))
 
     # сохраняем refresh hash в БД
     db.add(models.RefreshToken(
@@ -314,13 +315,13 @@ async def get_groups_by_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     # ✅ Синхронизируем LDAP-группы ПЕРЕД чтением из БД
-    # Это решает проблему "админ не видит новую группу до перелогина пользователя"
-    try:
-        sync_ldap_groups_for_user(db, user)
-    except Exception as e:
-        # Можно не падать полностью, а просто логировать и вернуть то, что есть в БД
-        # raise HTTPException(status_code=500, detail=f"LDAP sync failed: {str(e)}")
-        print(f"LDAP sync failed for user_id={user_id}: {e}")
+    # # Это решает проблему "админ не видит новую группу до перелогина пользователя"
+    # try:
+    #     # sync_ldap_groups_for_user(db, user)
+    # except Exception as e:
+    #     # Можно не падать полностью, а просто логировать и вернуть то, что есть в БД
+    #     # raise HTTPException(status_code=500, detail=f"LDAP sync failed: {str(e)}")
+    #     print(f"LDAP sync failed for user_id={user_id}: {e}")
 
     groups_with_creator = (
         db.query(models.Group, models.Users.name.label("creator_name"))
@@ -507,32 +508,37 @@ async def get_visible_groups_by_user(
     if current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access other user's groups")
 
-    # Запрос с JOIN на users для получения имени создателя
-    groups_with_creator = db.query(
-        models.Group,
-        models.Users.name.label('creator_name')
-    ).join(
-        models.UserGroupAssociation,
-        models.UserGroupAssociation.group_id == models.Group.id
-    ).filter(
-        models.UserGroupAssociation.user_id == user_id,
-        models.Group.visible == True
-    ).join(
-        models.Users,
-        models.Users.id == models.Group.created_by   # связываем создателя
-    ).all()
+    groups_with_creator = (
+        db.query(
+            models.Group,
+            models.Users.name.label('creator_name')
+        )
+        .join(
+            models.UserGroupAssociation,
+            models.UserGroupAssociation.group_id == models.Group.id
+        )
+        .outerjoin(  # <-- лучше outerjoin, чтобы группа не пропала, если created_by пустой
+            models.Users,
+            models.Users.id == models.Group.created_by
+        )
+        .filter(
+            models.UserGroupAssociation.user_id == user_id,
+            models.Group.visible.is_(True)
+        )
+        .all()
+    )
 
+    # ✅ Это НЕ ошибка — просто нет групп
     if not groups_with_creator:
-        raise HTTPException(status_code=404, detail="No visible groups found for this user")
+        return []
 
-    # Преобразуем результат в список схем
     result = []
     for group, creator_name in groups_with_creator:
         result.append(schemas.GroupWithCreator(
             id=group.id,
             name=group.name,
             description=group.description,
-            creator_name=creator_name,
+            creator_name=creator_name or "-",
             visible=group.visible
         ))
 
@@ -620,94 +626,6 @@ async def get_all_users_details(
 
     return result
 
-
-# @router.put("/passwords/{password_id}/group", response_model=schemas.Password)
-# async def update_password_group(
-#         password_id: int,
-#         group_id: Optional[int] = Query(default=None),   # <-- вот так
-#         db: Session = Depends(database.get_db),
-#         current_user: models.Users = Depends(get_current_user)
-# ):
-#     pw = db.query(models.PasswordManager).filter(models.PasswordManager.id == password_id).first()
-#     if not pw:
-#         raise HTTPException(status_code=404, detail="Password not found")
-#
-#     if pw.created_by != current_user.id and not current_user.issuperuser:
-#         raise HTTPException(status_code=403, detail="Not authorized to modify this password")
-#
-#     if group_id is not None:
-#         grp = db.query(models.Group).filter(models.Group.id == group_id).first()
-#         if not grp:
-#             raise HTTPException(status_code=404, detail="Group not found")
-#
-#     pw.password_group = group_id   # group_id может быть None → “убрать из группы”
-#     db.commit()
-#     db.refresh(pw)
-#     return pw
-# @router.get("/user/{user_id}/details", response_model=schemas.UserDetails)
-# async def get_user_details(
-#         user_id: int,
-#         db: Session = Depends(database.get_db),
-#         current_user: Users = Depends(get_current_user)
-# ):
-#     # Проверяем, является ли текущий пользователь суперпользователем
-#     if not current_user.issuperuser and current_user.id != user_id:
-#         raise HTTPException(status_code=403, detail="Not authorized to access other user's details")
-#
-#     # Получаем пользователя по user_id
-#     user = db.query(models.Users).filter(models.Users.id == user_id).first()
-#
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found")
-#
-#     # Получаем все пароли этого пользователя
-#     passwords = db.query(models.PasswordManager).filter(models.PasswordManager.created_by == user_id).all()
-#
-#     # Получаем все группы этого пользователя
-#     groups = db.query(models.Group).join(models.UserGroupAssociation).filter(
-#         models.UserGroupAssociation.user_id == user_id
-#     ).all()
-#
-#     # Формируем данные для паролей
-#     password_data = [
-#         schemas.Password(
-#             id=password.id,
-#             password=password.password,
-#             login_password=password.login_password,
-#             description=password.description,
-#             about_password=password.about_password,
-#             created_by=password.created_by
-#         )
-#         for password in passwords
-#     ]
-#
-#     # Формируем данные для групп
-#     group_names = [group.name for group in groups]
-#
-#     # Возвращаем данные
-#     return {
-#         "user_id": user.id,
-#         "name": user.name,
-#         "email": user.email,
-#         "issuperuser": user.issuperuser,
-#         "created_at": user.created_at.isoformat(),
-#         "groups": group_names,
-#         "passwords": password_data  # Передаем список объектов паролей
-#     }
-# @router.get("/all_passwords", response_model=List[schemas.Password])
-# async def get_all_passwords(db: Session = Depends(database.get_db), current_user: Users = Depends(get_current_user)):
-#     # Проверка прав суперпользователя
-#     if not current_user.issuperuser:
-#         raise HTTPException(status_code=403, detail="Not authorized to access all passwords")
-#
-#     # Получаем все пароли из БД
-#     passwords = db.query(models.PasswordManager).all()
-#
-#     if not passwords:
-#         raise HTTPException(status_code=404, detail="No passwords found")
-#
-#     # FastAPI автоматически преобразует ORM-объекты в Pydantic схемы, если в схеме настроено orm_mode = True
-#     return passwords
 
 @router.get("/all_passwords", response_model=List[schemas.Password])
 async def get_all_passwords(
@@ -950,35 +868,6 @@ async def get_user_passwords_with_groups(
 
     return result
 # Получить все пароли пользователя с информацией о группе
-# @router.get("/users/{user_id}/passwords", response_model=List[schemas.PasswordWithGroup])
-# async def get_user_passwords_with_groups(
-#         user_id: int,
-#         db: Session = Depends(database.get_db),
-#         current_user: models.Users = Depends(get_current_user)
-# ):
-#     # Проверка прав: пользователь может смотреть свои пароли, суперпользователь — любые
-#     if current_user.id != user_id and not current_user.issuperuser:
-#         raise HTTPException(status_code=403, detail="Not authorized")
-#
-#     passwords = db.query(models.PasswordManager).filter(models.PasswordManager.created_by == user_id).all()
-#     result = []
-#     for pwd in passwords:
-#         group_info = None
-#         if pwd.password_group:
-#             group = db.query(models.Group).filter(models.Group.id == pwd.password_group).first()
-#             if group:
-#                 group_info = schemas.GroupInfo(id=group.id, name=group.name)
-#         result.append(schemas.PasswordWithGroup(
-#             id=pwd.id,
-#             password=pwd.password,
-#             login_password=pwd.login_password,
-#             description=pwd.description,
-#             about_password=pwd.about_password,
-#             created_by=pwd.created_by,
-#             password_group=pwd.password_group,
-#             group_info=group_info
-#         ))
-#     return result
 
 @router.get("/admin/passwords/pick", response_model=list[schemas.PasswordPickItem])
 async def passwords_pick(

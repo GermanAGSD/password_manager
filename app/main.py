@@ -1,7 +1,7 @@
 import uvicorn
 from fastapi import FastAPI, status
 from app import schemas, models
-from app.routers import ldap_auth
+from app.routers import ldap_auth, group_ldap, users
 from app.database import engine
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,6 +22,8 @@ async def check_server():
     return {"message": "its work"}
 
 app.include_router(ldap_auth.router)
+app.include_router(group_ldap.router)
+app.include_router(users.router)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="192.168.0.25", port=8000)

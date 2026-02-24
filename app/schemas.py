@@ -1,6 +1,6 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from pydantic.types import conint
 
@@ -169,3 +169,38 @@ class PasswordRevealResponse(BaseModel):
     id: int
     password: str  # plaintext только по отдельному запросу
 
+class GroupCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    parent_id: Optional[int] = None
+    visible: bool = True
+    # ✅ Любой node_type
+    node_type: str = Field(default="group", min_length=1, max_length=64)
+
+class AddUserToGroupRequest(BaseModel):
+    user_id: int
+
+
+class AddUserToGroupResponse(BaseModel):
+    success: bool
+    message: str
+    group_id: int
+    user_id: int
+    
+class GroupOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: Optional[str]
+    parent_id: Optional[int]
+    visible: bool
+    node_type: str
+    created_by: Optional[int]
+    created_at: datetime
+
+
+class DeleteResponse(BaseModel):
+    success: bool
+    message: str
+    deleted_group_id: int

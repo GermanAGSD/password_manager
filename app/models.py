@@ -108,8 +108,8 @@ class Group(Base):
     created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     visible = Column(Boolean, nullable=False, default=True, server_default=text("true"))
 
-    # folder / restaurant / group
-    node_type = Column(String(32), nullable=False, default="group", server_default=text("'group'"), index=True)
+    # ✅ Любой тип узла (например: restaurant, address, office, city, team, department...)
+    node_type = Column(String(64), nullable=False, default="group", server_default=text("'group'"), index=True)
 
     parent_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
@@ -132,7 +132,6 @@ class Group(Base):
 
     passwords = relationship("PasswordManager", back_populates="group")
 
-    # локальные админы, привязанные к этой группе (обычно restaurant)
     admin_role_assignments = relationship(
         "AdminRoleAssignment",
         back_populates="scope_group",
@@ -142,9 +141,9 @@ class Group(Base):
     __table_args__ = (
         UniqueConstraint("parent_id", "name", name="uq_group_parent_name"),
         CheckConstraint("parent_id IS NULL OR parent_id <> id", name="ck_group_not_self_parent"),
-        CheckConstraint("node_type IN ('folder', 'restaurant', 'group')", name="ck_group_node_type"),
+        # ❌ УБРАЛИ ограничение на node_type
+        # CheckConstraint("node_type IN (...)", name="ck_group_node_type"),
     )
-
 
 class AdminRoleAssignment(Base):
     """
