@@ -186,7 +186,7 @@ class AddUserToGroupResponse(BaseModel):
     message: str
     group_id: int
     user_id: int
-    
+
 class GroupOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -204,3 +204,9 @@ class DeleteResponse(BaseModel):
     success: bool
     message: str
     deleted_group_id: int
+
+class GroupPickItem(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    visible: bool

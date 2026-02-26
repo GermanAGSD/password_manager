@@ -6,7 +6,7 @@ from app.database import get_db
 from app import models
 from app.models import Users
 from app.oauth import get_current_user
-from app.schemas import GroupCreate, GroupOut, DeleteResponse
+from app.schemas import GroupCreate, GroupOut, DeleteResponse, GroupPickItem
 from app.deps.admin_access import require_superuser
 
 router = APIRouter(prefix="/groups", tags=["Groups"])
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/groups", tags=["Groups"])
 
 @router.post("/", response_model=GroupOut, status_code=status.HTTP_201_CREATED)
 def create_group(
-        user_id: int,
+        # user_id: int,
         payload: GroupCreate,
         db: Session = Depends(get_db),
         current_user: Users = Depends(get_current_user)
@@ -108,3 +108,23 @@ def delete_group(
         message="Группа удалена",
         deleted_group_id=group_id,
     )
+
+@router.get("/pick", response_model=list[GroupPickItem])
+def get_groups_pick(
+        db: Session = Depends(get_db),
+        current_user: Users = Depends(get_current_user)
+):
+    if not current_user.issuperuser:
+        raise HTTPException(status_code=403, detail="Not issuperuser")
+
+    rows = db.query(models.Group).order_by(models.Group.name.asc()).all()
+
+    return [
+        GroupPickItem(
+            id=g.id,
+            name=g.name,
+            description=g.description,
+            visible=g.visible,
+        )
+        for g in rows
+    ]
