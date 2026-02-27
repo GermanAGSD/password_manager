@@ -210,3 +210,65 @@ class GroupPickItem(BaseModel):
     name: str
     description: Optional[str] = None
     visible: bool
+
+class DirectoryObjectCreateRequest(BaseModel):
+    name: str
+    description: str = None
+    object_type: str = "object"
+    visible: bool = True
+    parent_id: Optional[int] = None  # ID родительского объекта (если есть)
+
+class DirectoryObjectPickResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    object_type: str
+    visible: bool
+
+    class Config:
+        from_attributes = True
+
+class DirectoryObjectResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    object_type: str
+    visible: bool
+    parent_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True  # orm_mode = True для Pydantic v1
+
+# Pydantic схемы для ответов
+class UserObjectResponse(BaseModel):
+    id: int
+    name: str
+    object_type: str
+    visible: bool
+
+    class Config:
+        from_attributes = True
+
+class ObjectsCountResponse(BaseModel):
+    user_id: int
+    count: int
+
+# Схемы для ответов
+class UserObjectResponse(BaseModel):
+    id: int
+    name: str
+    object_type: str
+    visible: bool
+
+    class Config:
+        from_attributes = True
+
+# Схема для ответа с данными пользователя
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: Optional[str] = None
+    # добавьте другие поля, если нужно (например, issuperuser, created_at)
+
+    class Config:
+        from_attributes = True
