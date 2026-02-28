@@ -344,7 +344,6 @@ async def login(
 ):
     # 1. Проверяем, есть ли пользователь в локальной БД
     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
-
     if user:
         # Пользователь существует – локальная аутентификация
         if not verify_password(login_data.password, user.domainpass):
