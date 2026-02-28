@@ -392,6 +392,7 @@ async def login(
         # Здесь можно добавить логику привязки групп из LDAP, если нужно
         # (раскомментировать код из исходного варианта)
 
+
     # Генерируем токены (общая часть для обоих случаев)
     access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
     refresh_token, refresh_hash, expires = create_refresh_token()
