@@ -5,23 +5,45 @@ networks:
     external: true
 
 services:
-  frontend:
-    build: .                   # путь к папке с React-приложением
-    container_name: password_manager_front
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"                     # опционально, для дашборда
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/etc/traefik/dynamic/traefik_dynamic.yml"   # файл с сертификатами
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"          # дашборд (опционально)
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "/home/monitoring/certs:/certs:ro"                                   # папка с сертификатами
+      - "./traefik_dynamic.yml:/etc/traefik/dynamic/traefik_dynamic.yml:ro" # конфиг с сертификатами
+    networks:
+      - traefik-net
+
+  backend:
+    build: .
+    container_name: password_manager_backend
     restart: always
     expose:
-      - "3000"
-    environment:
-      - CHOKIDAR_USEPOLLING=true
-      - WATCHPACK_POLLING=true
+      - "6100"
+    env_file:
+      - .env
     volumes:
-      - ./:/app
-      - /app/node_modules
+      - ./:/usr/src/app          # монтирование для разработки (можно убрать в проде)
     networks:
       - traefik-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.frontend.rule=Host(`passwordmanager.thebull.ru`)"
-      - "traefik.http.routers.frontend.entrypoints=websecure"
-      - "traefik.http.routers.frontend.tls=true"          # обязательно, но без certresolver
-      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+      - "traefik.http.routers.backend.rule=Host(`password.thebull.ru`)"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.routers.backend.tls=true"          # обязательно, но без certresolver
+      - "traefik.http.services.backend.loadbalancer.server.port=6100"
