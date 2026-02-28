@@ -310,3 +310,25 @@ class UserWithCountsResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# Схема для запроса создания локального пользователя
+class LocalUserCreate(BaseModel):
+    name: str
+    email: str
+    password: str
+    issuperuser: Optional[bool] = False
+
+# Схема для ответа (без пароля)
+class LocalUserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    issuperuser: bool
+    created_at: datetime  # используем datetime, а не str
+
+    class Config:
+        from_attributes = True
+
+class LocalLoginRequest(BaseModel):
+    username: str
+    password: str

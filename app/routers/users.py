@@ -1,5 +1,5 @@
 from app.schemas import AddUserToGroupRequest, AddUserToGroupResponse, DeleteResponse, UserObjectResponse, \
-    ObjectsCountResponse, UserResponse
+    ObjectsCountResponse, UserResponse, LocalUserResponse, LocalUserCreate
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -9,10 +9,46 @@ from app.models import Users, ObjectUserAssignment, DirectoryObject
 from app.oauth import get_current_user
 from typing import List
 from sqlalchemy import func
+from app.utils import hash_password
 router = APIRouter(
     prefix="/users",
     tags=["users"]
 )
+
+@router.post("/local_user/create_local_user", response_model=LocalUserResponse, status_code=status.HTTP_201_CREATED)
+def create_local_user(
+        user_data: LocalUserCreate,
+        db: Session = Depends(get_db),
+        current_user: Users = Depends(get_current_user)
+):
+    """
+    Создаёт нового локального пользователя.
+    Доступно только суперпользователям.
+    """
+    # Проверка прав
+    if not current_user.issuperuser:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+
+    # Проверка уникальности email
+    existing = db.query(Users).filter(Users.email == user_data.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+
+    # Хэширование пароля
+    hashed_password = hash_password(user_data.password)
+
+    # Создание пользователя
+    new_user = Users(
+        name=user_data.name,
+        email=user_data.email,
+        domainpass=hashed_password,
+        issuperuser=user_data.issuperuser
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return new_user
 
 @router.get("/{user_id}", response_model=UserResponse)
 def get_user(
@@ -292,3 +328,4 @@ def get_objects_counts(
     ).group_by(ObjectUserAssignment.user_id).all()
 
     return [{"user_id": row[0], "count": row[1]} for row in counts]
+

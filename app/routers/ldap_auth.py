@@ -10,11 +10,13 @@ from fastapi import FastAPI, Depends, Form, HTTPException, Response, Cookie, API
 from app import schemas, models
 from app import database
 from sqlalchemy.orm import Session
-from app.models import Users
+from app.models import Users, RefreshToken
 import secrets
 import hashlib
 from passlib.context import CryptContext
 from sqlalchemy import delete, or_
+
+from app.schemas import LocalLoginRequest
 from app.settings import settings
 from app.utils import hash_password, verify_password
 from fastapi.security.oauth2 import OAuth2PasswordRequestForm
@@ -293,94 +295,115 @@ async def get_visible_passwords(
 #         "user_id": user.id,
 #     }
 
+@router.post("/login/local", response_model=schemas.Token)
+async def local_login(
+        response: Response,
+        login_data: LocalLoginRequest,
+        db: Session = Depends(database.get_db)
+):
+    """
+    Аутентификация локального пользователя по email и паролю (без LDAP).
+    Возвращает access и refresh токены, а также информацию о пользователе.
+    """
+    # 1. Ищем пользователя по email
+    user = db.query(Users).filter(Users.email == login_data.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # 2. Проверяем пароль (хранится в поле domainpass)
+    if not verify_password(login_data.password, user.domainpass):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # 3. Создаём токены
+    access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
+    refresh_token, refresh_hash, expires = create_refresh_token()
+
+    # 4. Сохраняем refresh-токен в БД
+    db.add(RefreshToken(
+        user_id=user.id,
+        token_hash=refresh_hash,
+        expires_at=expires,
+        revoked=False
+    ))
+    db.commit()
+
+    # 5. Возвращаем результат (структура соответствует schemas.Token)
+    return {
+        "refresh_token": refresh_token,
+        "access_token": access_token,
+        "token_type": "bearer",
+        "issuperuser": user.issuperuser,
+        "user_id": user.id,
+    }
 
 @router.post("/login", response_model=schemas.Token)
-async def login_for_access_token(
+async def login(
         response: Response,
         login_data: schemas.LoginRequest,
         db: Session = Depends(database.get_db),
 ):
-    # LDAP auth
-    server = Server(LDAP_SERVER, get_info=ALL)
-    conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
-
-    search_filter = f"(sAMAccountName={login_data.username})"
-    # conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "mail", "memberOf"])
-    conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "displayName", "mail", "memberOf"])
-
-    if len(conn.entries) == 0:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user_dn = conn.entries[0].entry_dn
-    user_conn = Connection(server, user_dn, login_data.password, authentication=SIMPLE)
-
-    if not user_conn.bind():
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    # groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, "values") else []
-    # Извлекаем имя пользователя (displayName, если есть, иначе cn)
-    if hasattr(conn.entries[0], 'displayName') and conn.entries[0].displayName:
-        display_name = conn.entries[0].displayName.value
-    else:
-        display_name = conn.entries[0].cn.value if hasattr(conn.entries[0], 'cn') else login_data.username
-
-    # print(display_name)
-    # DB user
+    # 1. Проверяем, есть ли пользователь в локальной БД
     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
 
-    # Хэшируем пароль для хранения
-    hashed = hash_password(login_data.password)
+    if user:
+        # Пользователь существует – локальная аутентификация
+        if not verify_password(login_data.password, user.domainpass):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not user:
+        # (Опционально) обновляем хэш пароля, если он изменился
+        # (можно оставить как в исходном коде)
+
+    else:
+        # Пользователя нет в БД – пробуем LDAP
+        server = Server(LDAP_SERVER, get_info=ALL)
+        conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
+
+        search_filter = f"(sAMAccountName={login_data.username})"
+        conn.search("DC=bull,DC=local", search_filter, SUBTREE,
+                    attributes=["cn", "displayName", "mail", "memberOf"])
+
+        if len(conn.entries) == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user_dn = conn.entries[0].entry_dn
+        user_conn = Connection(server, user_dn, login_data.password, authentication=SIMPLE)
+        if not user_conn.bind():
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Извлекаем отображаемое имя
+        if hasattr(conn.entries[0], 'displayName') and conn.entries[0].displayName:
+            display_name = conn.entries[0].displayName.value
+        else:
+            display_name = conn.entries[0].cn.value if hasattr(conn.entries[0], 'cn') else login_data.username
+
+        # Хэшируем пароль для хранения в БД
+        hashed = hash_password(login_data.password)
+
+        # Создаём нового пользователя
         user = models.Users(
-            name=login_data.username,
+            name=display_name,
             email=login_data.username,
-            domainpass=hashed,   # <-- ХЭШ вместо plain
+            domainpass=hashed,
+            # issuperuser по умолчанию False
         )
         db.add(user)
         db.commit()
         db.refresh(user)
-    else:
-        # (опционально) обновляем хэш только если пароль отличается
-        # если domainpass может быть пустой/None - учти это
-        try:
-            needs_update = not verify_password(login_data.password, user.domainpass)
-        except Exception:
-            needs_update = True
 
-        if needs_update:
-            user.domainpass = hashed
-            db.commit()
-            db.refresh(user)
+        # Здесь можно добавить логику привязки групп из LDAP, если нужно
+        # (раскомментировать код из исходного варианта)
 
-    # access/refresh токены
+    # Генерируем токены (общая часть для обоих случаев)
     access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
     refresh_token, refresh_hash, expires = create_refresh_token()
 
-    # Группы/ассоциации — лучше без дублей
-    # for group_dn in groups:
-    #     group = db.query(models.Group).filter(models.Group.name == group_dn).first()
-    #     if not group:
-    #         group = models.Group(name=group_dn, created_by=user.id)
-    #         db.add(group)
-    #         db.flush()  # вместо commit внутри цикла
-    #
-    #     exists = db.query(models.UserGroupAssociation).filter(
-    #         models.UserGroupAssociation.user_id == user.id,
-    #         models.UserGroupAssociation.group_id == group.id
-    #     ).first()
-    #
-    #     if not exists:
-    #         db.add(models.UserGroupAssociation(user_id=user.id, group_id=group.id))
-
-    # сохраняем refresh hash в БД
+    # Сохраняем refresh-токен
     db.add(models.RefreshToken(
         user_id=user.id,
         token_hash=refresh_hash,
         expires_at=expires,
         revoked=False
     ))
-
     db.commit()
 
     return {
@@ -390,6 +413,102 @@ async def login_for_access_token(
         "issuperuser": user.issuperuser,
         "user_id": user.id,
     }
+# @router.post("/login", response_model=schemas.Token)
+# async def login_for_access_token(
+#         response: Response,
+#         login_data: schemas.LoginRequest,
+#         db: Session = Depends(database.get_db),
+# ):
+#     # LDAP auth
+#     server = Server(LDAP_SERVER, get_info=ALL)
+#     conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
+#
+#     search_filter = f"(sAMAccountName={login_data.username})"
+#     # conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "mail", "memberOf"])
+#     conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "displayName", "mail", "memberOf"])
+#
+#     if len(conn.entries) == 0:
+#         raise HTTPException(status_code=404, detail="User not found")
+#
+#     user_dn = conn.entries[0].entry_dn
+#     user_conn = Connection(server, user_dn, login_data.password, authentication=SIMPLE)
+#
+#     if not user_conn.bind():
+#         raise HTTPException(status_code=401, detail="Invalid credentials")
+#
+#     # groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, "values") else []
+#     # Извлекаем имя пользователя (displayName, если есть, иначе cn)
+#     if hasattr(conn.entries[0], 'displayName') and conn.entries[0].displayName:
+#         display_name = conn.entries[0].displayName.value
+#     else:
+#         display_name = conn.entries[0].cn.value if hasattr(conn.entries[0], 'cn') else login_data.username
+#
+#     # print(display_name)
+#     # DB user
+#     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
+#
+#     # Хэшируем пароль для хранения
+#     hashed = hash_password(login_data.password)
+#
+#     if not user:
+#         user = models.Users(
+#             name=login_data.username,
+#             email=login_data.username,
+#             domainpass=hashed,   # <-- ХЭШ вместо plain
+#         )
+#         db.add(user)
+#         db.commit()
+#         db.refresh(user)
+#     else:
+#         # (опционально) обновляем хэш только если пароль отличается
+#         # если domainpass может быть пустой/None - учти это
+#         try:
+#             needs_update = not verify_password(login_data.password, user.domainpass)
+#         except Exception:
+#             needs_update = True
+#
+#         if needs_update:
+#             user.domainpass = hashed
+#             db.commit()
+#             db.refresh(user)
+#
+#     # access/refresh токены
+#     access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
+#     refresh_token, refresh_hash, expires = create_refresh_token()
+#
+#     # Группы/ассоциации — лучше без дублей
+#     # for group_dn in groups:
+#     #     group = db.query(models.Group).filter(models.Group.name == group_dn).first()
+#     #     if not group:
+#     #         group = models.Group(name=group_dn, created_by=user.id)
+#     #         db.add(group)
+#     #         db.flush()  # вместо commit внутри цикла
+#     #
+#     #     exists = db.query(models.UserGroupAssociation).filter(
+#     #         models.UserGroupAssociation.user_id == user.id,
+#     #         models.UserGroupAssociation.group_id == group.id
+#     #     ).first()
+#     #
+#     #     if not exists:
+#     #         db.add(models.UserGroupAssociation(user_id=user.id, group_id=group.id))
+#
+#     # сохраняем refresh hash в БД
+#     db.add(models.RefreshToken(
+#         user_id=user.id,
+#         token_hash=refresh_hash,
+#         expires_at=expires,
+#         revoked=False
+#     ))
+#
+#     db.commit()
+#
+#     return {
+#         "refresh_token": refresh_token,
+#         "access_token": access_token,
+#         "token_type": "bearer",
+#         "issuperuser": user.issuperuser,
+#         "user_id": user.id,
+#     }
 
 
 @router.get("/user/{user_id}/groups", response_model=list[schemas.GroupWithCreator])

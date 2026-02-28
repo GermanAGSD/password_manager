@@ -15,7 +15,7 @@ oauth_scheme = OAuth2PasswordBearer(tokenUrl='/login')
 
 SECRET_KEY = "my_secret_key"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 720
+ACCESS_TOKEN_EXPIRE_MINUTES = 1
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
