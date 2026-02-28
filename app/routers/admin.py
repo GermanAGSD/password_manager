@@ -5,15 +5,39 @@ from sqlalchemy import func
 from typing import List
 
 from app.database import get_db
-from app.models import Users, ObjectUserAssignment
+from app.models import Users, ObjectUserAssignment, DirectoryObject, ObjectGroupAssignment
 from app.oauth import get_current_user
 from pydantic import BaseModel
 
+from app.schemas import ObjectAdminResponse, ObjectsCountResponse
+
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-class ObjectsCountResponse(BaseModel):
-    user_id: int
-    count: int
+
+
+@router.get("/objects", response_model=List[ObjectAdminResponse])
+def get_objects_admin(
+        db: Session = Depends(get_db),
+        current_user: Users = Depends(get_current_user)
+):
+    if not current_user.issuperuser:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    objects = db.query(DirectoryObject).all()
+    result = []
+    for obj in objects:
+        user_count = db.query(ObjectUserAssignment).filter(ObjectUserAssignment.object_id == obj.id).count()
+        group_count = db.query(ObjectGroupAssignment).filter(ObjectGroupAssignment.object_id == obj.id).count()
+        child_count = db.query(DirectoryObject).filter(DirectoryObject.parent_id == obj.id).count()
+        result.append({
+            "id": obj.id,
+            "name": obj.name,
+            "object_type": obj.object_type,
+            "visible": obj.visible,
+            "user_count": user_count,
+            "group_count": group_count,
+            "child_count": child_count
+        })
+    return result
 
 @router.get("/users/objects_counts", response_model=List[ObjectsCountResponse])
 def get_objects_counts(

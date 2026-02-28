@@ -208,6 +208,91 @@ async def get_visible_passwords(
 #     )
 #
 #     return q.all()
+# @router.post("/login", response_model=schemas.Token)
+# async def login_for_access_token(
+#         response: Response,
+#         login_data: schemas.LoginRequest,
+#         db: Session = Depends(database.get_db),
+# ):
+#     # LDAP auth
+#     server = Server(LDAP_SERVER, get_info=ALL)
+#     conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
+#
+#     search_filter = f"(sAMAccountName={login_data.username})"
+#     # Добавляем атрибуты, которые хотим получить
+#     conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "displayName", "mail", "memberOf"])
+#
+#     if len(conn.entries) == 0:
+#         raise HTTPException(status_code=404, detail="User not found")
+#
+#     user_dn = conn.entries[0].entry_dn
+#     user_conn = Connection(server, user_dn, login_data.password, authentication=SIMPLE)
+#
+#     if not user_conn.bind():
+#         raise HTTPException(status_code=401, detail="Invalid credentials")
+#
+#     # Извлекаем имя пользователя (displayName, если есть, иначе cn)
+#     if hasattr(conn.entries[0], 'displayName') and conn.entries[0].displayName:
+#         display_name = conn.entries[0].displayName.value
+#     else:
+#         display_name = conn.entries[0].cn.value if hasattr(conn.entries[0], 'cn') else login_data.username
+#
+#     # Извлекаем email
+#     email = conn.entries[0].mail.value if hasattr(conn.entries[0], 'mail') else login_data.username
+#
+#     # DB user
+#     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
+#     print(display_name)
+#     print(email)
+#     # Хэшируем пароль для хранения
+#     hashed = hash_password(login_data.password)
+#
+#     if not user:
+#         # Создаём нового пользователя с данными из LDAP
+#         user = models.Users(
+#             name=display_name,
+#             email=email,
+#             domainpass=hashed,
+#         )
+#         db.add(user)
+#         db.commit()
+#         db.refresh(user)
+#     else:
+#         # Обновляем имя и email, если они изменились (опционально)
+#         if user.name != display_name or user.email != email:
+#             user.name = display_name
+#             user.email = email
+#             # Если нужно обновить хэш пароля только при изменении
+#             try:
+#                 needs_update = not verify_password(login_data.password, user.domainpass)
+#             except Exception:
+#                 needs_update = True
+#             if needs_update:
+#                 user.domainpass = hashed
+#             db.commit()
+#             db.refresh(user)
+#
+#     # access/refresh токены
+#     access_token = create_token(data={"user_id": user.id, "issuperuser": user.issuperuser})
+#     refresh_token, refresh_hash, expires = create_refresh_token()
+#
+#     # Сохраняем refresh-токен
+#     db.add(models.RefreshToken(
+#         user_id=user.id,
+#         token_hash=refresh_hash,
+#         expires_at=expires,
+#         revoked=False
+#     ))
+#     db.commit()
+#
+#     return {
+#         "refresh_token": refresh_token,
+#         "access_token": access_token,
+#         "token_type": "bearer",
+#         "issuperuser": user.issuperuser,
+#         "user_id": user.id,
+#     }
+
 
 @router.post("/login", response_model=schemas.Token)
 async def login_for_access_token(
@@ -220,7 +305,8 @@ async def login_for_access_token(
     conn = Connection(server, LDAP_BIND_DN, LDAP_PASSWORD, auto_bind=True)
 
     search_filter = f"(sAMAccountName={login_data.username})"
-    conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "mail", "memberOf"])
+    # conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "mail", "memberOf"])
+    conn.search("DC=bull,DC=local", search_filter, SUBTREE, attributes=["cn", "displayName", "mail", "memberOf"])
 
     if len(conn.entries) == 0:
         raise HTTPException(status_code=404, detail="User not found")
@@ -232,7 +318,13 @@ async def login_for_access_token(
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # groups = conn.entries[0].memberOf.values if hasattr(conn.entries[0].memberOf, "values") else []
+    # Извлекаем имя пользователя (displayName, если есть, иначе cn)
+    if hasattr(conn.entries[0], 'displayName') and conn.entries[0].displayName:
+        display_name = conn.entries[0].displayName.value
+    else:
+        display_name = conn.entries[0].cn.value if hasattr(conn.entries[0], 'cn') else login_data.username
 
+    # print(display_name)
     # DB user
     user = db.query(models.Users).filter(models.Users.email == login_data.username).first()
 

@@ -1,14 +1,135 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import DirectoryObject, Users
+from app.models import DirectoryObject, Users, ObjectUserAssignment, UserGroupAssociation, PasswordManager, \
+    UserPasswordShare
 from pydantic import BaseModel
 from typing import List
 from app.oauth import get_current_user
-from app.schemas import DirectoryObjectCreateRequest, DirectoryObjectPickResponse, DirectoryObjectResponse
-
+from app.schemas import DirectoryObjectCreateRequest, DirectoryObjectPickResponse, DirectoryObjectResponse, \
+    ObjectUserResponse, UserWithCountsResponse
+from sqlalchemy import func
 router = APIRouter(prefix="/objects", tags=["objects"])
+@router.get("/{object_id}/users_with_counts", response_model=List[UserWithCountsResponse])
+def get_object_users_with_counts(
+        object_id: int,
+        db: Session = Depends(get_db),
+        current_user: Users = Depends(get_current_user)
+):
+    """
+    Возвращает пользователей, назначенных на объект, с подсчётом их групп,
+    видимых паролей и объектов, на которые они назначены.
+    Доступно только суперпользователю.
+    """
+    if not current_user.issuperuser:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
 
+    # Проверяем существование объекта (опционально)
+    obj = db.get(DirectoryObject, object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    # Получаем всех пользователей, назначенных на этот объект
+    assignments = db.query(ObjectUserAssignment).filter(ObjectUserAssignment.object_id == object_id).all()
+    user_ids = [a.user_id for a in assignments]
+    if not user_ids:
+        return []
+
+    # Загружаем пользователей
+    users = db.query(Users).filter(Users.id.in_(user_ids)).all()
+
+    # Подсчёт групп для каждого пользователя
+    group_counts = dict(
+        db.query(UserGroupAssociation.user_id, func.count(UserGroupAssociation.group_id))
+        .filter(UserGroupAssociation.user_id.in_(user_ids))
+        .group_by(UserGroupAssociation.user_id)
+        .all()
+    )
+
+    # Подсчёт собственных паролей (созданных пользователем)
+    own_passwords = dict(
+        db.query(PasswordManager.created_by, func.count(PasswordManager.id))
+        .filter(PasswordManager.created_by.in_(user_ids))
+        .group_by(PasswordManager.created_by)
+        .all()
+    )
+
+    # Подсчёт расшаренных паролей (пароли, доступные пользователю через shares)
+    shared_passwords = dict(
+        db.query(UserPasswordShare.user_id, func.count(UserPasswordShare.password_id))
+        .filter(UserPasswordShare.user_id.in_(user_ids))
+        .group_by(UserPasswordShare.user_id)
+        .all()
+    )
+
+    # Общее количество паролей (свои + расшаренные)
+    passwords_count = {}
+    for uid in user_ids:
+        passwords_count[uid] = own_passwords.get(uid, 0) + shared_passwords.get(uid, 0)
+
+    # Подсчёт объектов, на которые назначен пользователь (включая текущий)
+    objects_counts = dict(
+        db.query(ObjectUserAssignment.user_id, func.count(ObjectUserAssignment.object_id))
+        .filter(ObjectUserAssignment.user_id.in_(user_ids))
+        .group_by(ObjectUserAssignment.user_id)
+        .all()
+    )
+
+    # Формируем ответ
+    result = []
+    for user in users:
+        result.append(UserWithCountsResponse(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            issuperuser=user.issuperuser,
+            groups_count=group_counts.get(user.id, 0),
+            passwords_count=passwords_count.get(user.id, 0),
+            objects_count=objects_counts.get(user.id, 0)
+        ))
+    return result
+@router.get("/{object_id}/users", response_model=List[ObjectUserResponse])
+def get_object_users(
+        object_id: int,
+        db: Session = Depends(get_db),
+        current_user: Users = Depends(get_current_user)
+):
+    """
+    Возвращает список пользователей, назначенных на объект.
+    Доступно всем аутентифицированным пользователям (можно ограничить по правам).
+    """
+
+    # Проверяем существование объекта (опционально)
+    obj = db.get(DirectoryObject, object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    # Получаем все назначения для этого объекта
+    assignments = db.query(ObjectUserAssignment).filter(
+        ObjectUserAssignment.object_id == object_id
+    ).all()
+
+    # Собираем ID пользователей
+    user_ids = [a.user_id for a in assignments]
+    if not user_ids:
+        return []
+
+    # Загружаем пользователей
+    users = db.query(Users).filter(Users.id.in_(user_ids)).all()
+
+    # Создаём словарь ролей для быстрого доступа
+    roles = {a.user_id: a.role for a in assignments}
+
+    # Формируем ответ
+    result = []
+    for u in users:
+        result.append({
+            "id": u.id,
+            "name": u.name,
+            "email": u.email,
+            "role": roles.get(u.id)
+        })
+    return result
 
 @router.get("/objects_tree", response_model=List[DirectoryObjectResponse])
 async def get_objects(
@@ -105,3 +226,4 @@ async def get_object(
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
     return obj
+

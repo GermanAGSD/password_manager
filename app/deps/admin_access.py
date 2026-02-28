@@ -1,10 +1,12 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, APIRouter
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app import models
 from app.models import Users
 from app.oauth import get_current_user
+
+router = APIRouter(tags=["Groups"])
 
 
 def is_superuser(db: Session, user_id: int) -> bool:

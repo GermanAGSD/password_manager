@@ -272,3 +272,41 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# Схема для ответа (можно вынести в schemas.py)
+class ObjectUserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    role: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class ObjectsCountResponse(BaseModel):
+    user_id: int
+    count: int
+
+class ObjectAdminResponse(BaseModel):
+    id: int
+    name: str
+    object_type: str
+    visible: bool
+    user_count: int
+    group_count: int
+    child_count: int
+
+    class Config:
+        from_attributes = True
+
+class UserWithCountsResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    issuperuser: bool
+    groups_count: int
+    passwords_count: int
+    objects_count: int
+
+    class Config:
+        from_attributes = True
